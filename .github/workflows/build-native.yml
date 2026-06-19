@@ -9,6 +9,9 @@ on:
         description: "Version tag for the release"
         required: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.target }}
@@ -62,7 +65,7 @@ jobs:
       - name: Upload binary as release asset
         if: github.event_name == 'release'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           asset_name="${{ matrix.output }}-${{ matrix.asset_suffix }}"
           cp "native/target/${{ matrix.target }}/release/${{ matrix.output }}" "/tmp/$asset_name"
