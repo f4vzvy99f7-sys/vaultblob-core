@@ -62,14 +62,23 @@ jobs:
           --target ${{ matrix.target }}
           --release
 
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload binary as release asset
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           asset_name="${{ matrix.output }}-${{ matrix.asset_suffix }}"
           cp "native/target/${{ matrix.target }}/release/${{ matrix.output }}" "/tmp/$asset_name"
-          gh release upload "${{ github.ref_name }}" "/tmp/$asset_name" --clobber
+          gh release upload "${{ steps.tag.outputs.value }}" "/tmp/$asset_name" --clobber
 
       - uses: actions/upload-artifact@v4
         with:
