@@ -1,0 +1,14 @@
+[package]
+name = "vaultblob-go-native"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "vaultblob"
+
+[dependencies]
+argon2 = "0.5"
+rand = "0.10.1"
+vaultblob-core = { path = "../.." }

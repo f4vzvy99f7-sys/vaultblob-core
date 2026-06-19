@@ -3,8 +3,8 @@
 # Rust build artifacts for Go native FFI crate
 go/native/target/
 
-# Go binary placeholder files (to be replaced by real CI builds)
-# Remove this once CI is set up and binaries are committed
-# go/bin/*/*.so
-# go/bin/*/*.dylib
-# go/bin/*/*.dll
+# Real compiled native libraries — never commit binaries to main branch
+# CI replaces 0-byte placeholders in release tags only
+go/bin/**/*.so
+go/bin/**/*.dylib
+go/bin/**/*.dll
