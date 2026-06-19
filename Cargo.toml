@@ -1,0 +1,19 @@
+[package]
+name = "vaultblob-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+blake2 = "0.10.6"
+chacha20 = { version = "0.10.0", features = ["xchacha"] }
+chacha20poly1305 = "0.10.1"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+hkdf = "0.13.0"
+libc = "0.2.177"
+rand = "0.10.1"
+rpassword = "7"
+sha2 = "0.11.0"
+uuid = "1.23.1"

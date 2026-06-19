@@ -1,0 +1,107 @@
+name: Build Go native libraries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag for the release"
+        required: true
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            output: libvaultblob.so
+            goos: linux
+            goarch: amd64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            output: libvaultblob.so
+            goos: linux
+            goarch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            output: libvaultblob.dylib
+            goos: darwin
+            goarch: amd64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            output: libvaultblob.dylib
+            goos: darwin
+            goarch: arm64
+          - target: x86_64-pc-windows-gnu
+            runner: ubuntu-latest
+            output: vaultblob.dll
+            goos: windows
+            goarch: amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Build with zigbuild
+        run: >
+          cargo zigbuild
+          --manifest-path go/native/Cargo.toml
+          --target ${{ matrix.target }}
+          --release
+
+      - name: Copy binary
+        run: |
+          mkdir -p dist/${{ matrix.goos }}_${{ matrix.goarch }}
+          cp \
+            go/native/target/${{ matrix.target }}/release/${{ matrix.output }} \
+            dist/${{ matrix.goos }}_${{ matrix.goarch }}/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vaultblob-${{ matrix.target }}
+          path: dist/${{ matrix.goos }}_${{ matrix.goarch }}/
+          if-no-files-found: error
+
+  release:
+    name: Create release artifacts
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vaultblob-*
+          merge-multiple: true
+
+      - name: Prepare Go bin modules
+        run: |
+          for dir in dist/*/; do
+            goos_goarch=$(basename "$dir")
+            goos="${goos_goarch%_*}"
+            goarch="${goos_goarch#*_}"
+            mkdir -p go/bin/${goos}_${goarch}
+            cp "$dir"/* "go/bin/${goos}_${goarch}/"
+          done
+
+      - name: Create Pull Request for Go module update
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "Update Go native binaries for ${{ github.ref_name }}"
+          body: "Auto-generated from vaultblob-core release ${{ github.ref_name }}"
+          branch: update-go-binaries/${{ github.ref_name }}
+          base: main
+          commit-message: "Update Go native binaries for ${{ github.ref_name }}"
+          add-paths: go/bin/

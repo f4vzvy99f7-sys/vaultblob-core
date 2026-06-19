@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vaultblob"
+version = "0.1.0"
+description = "Python bindings and CLI for vaultblob (PyO3 wrapper over vaultblob-core)"
+requires-python = ">=3.10"
+
+[project.scripts]
+vaultblob = "vaultblob.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[[tool.uv.index]]
+url = "https://us-west2-python.pkg.dev/seed-7bc8b9/pypi/simple"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+python-source = "."
+module-name = "vaultblob._native"

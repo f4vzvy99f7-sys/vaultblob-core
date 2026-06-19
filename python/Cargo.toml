@@ -1,0 +1,15 @@
+[package]
+name = "vaultblob-py"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+argon2 = "0.5"
+pyo3 = { version = "0.23", features = ["extension-module"] }
+rand = "0.10.1"
+vaultblob-core = { path = ".." }
