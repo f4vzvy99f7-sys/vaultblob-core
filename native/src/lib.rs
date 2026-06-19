@@ -104,6 +104,75 @@ pub unsafe extern "C" fn vaultblob_open(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn vaultblob_open_vault(
+    path: *const c_char,
+    vault_id: *const u8,
+    master_key: *const u8,
+    max_chunk_size: u64,
+    max_blob_size: u64,
+    split_files: i32,
+    stripe_chunks: i32,
+    verbose: i32,
+    error_out: *mut *mut c_char,
+) -> *mut Session {
+    let path_str = match unsafe { cstr_to_str(path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            if !error_out.is_null() {
+                unsafe { *error_out = to_c_string(&to_vault_err(e)); }
+            }
+            return std::ptr::null_mut();
+        }
+    };
+    let verbose = verbose != 0;
+    let path = PathBuf::from(&path_str);
+
+    if vault_id.is_null() || master_key.is_null() {
+        if !error_out.is_null() {
+            unsafe { *error_out = to_c_string("vault_id or master_key is null"); }
+        }
+        return std::ptr::null_mut();
+    }
+
+    let vid = unsafe {
+        let mut bytes = [0u8; 16];
+        std::ptr::copy_nonoverlapping(vault_id, bytes.as_mut_ptr(), 16);
+        VaultId(bytes)
+    };
+    let mk = unsafe {
+        let mut bytes = [0u8; 32];
+        std::ptr::copy_nonoverlapping(master_key, bytes.as_mut_ptr(), 32);
+        VaultMasterKey(bytes)
+    };
+
+    let config = VaultConfig {
+        max_chunk_size: max_chunk_size as usize,
+        max_blob_size,
+        split_files_across_blobs: split_files != 0,
+        stripe_chunks_across_blobs: stripe_chunks != 0,
+        cache_indexes_on_open: true,
+    };
+
+    let vault = match vault_io::open_vault_from_dir(&path, vid, &mk, config, verbose) {
+        Ok(v) => v,
+        Err(e) => {
+            if !error_out.is_null() {
+                unsafe { *error_out = to_c_string(&to_vault_err(e)); }
+            }
+            return std::ptr::null_mut();
+        }
+    };
+
+    Box::into_raw(Box::new(Session {
+        vault_dir: path,
+        vault: Mutex::new(vault),
+        vault_id: vid,
+        master_key: mk,
+        verbose,
+    }))
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vaultblob_open_existing(
     path: *const c_char,
     password: *const c_char,

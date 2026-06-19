@@ -21,9 +21,14 @@ vaultblob_session* vaultblob_open(
     char** error_out
 );
 
-vaultblob_session* vaultblob_open_existing(
+vaultblob_session* vaultblob_open_vault(
     const char* path,
-    const char* password,
+    const uint8_t* vault_id,
+    const uint8_t* master_key,
+    uint64_t max_chunk_size,
+    uint64_t max_blob_size,
+    int split_files,
+    int stripe_chunks,
     int verbose,
     char** error_out
 );
