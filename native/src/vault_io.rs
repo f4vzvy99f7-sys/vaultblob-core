@@ -1,13 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngExt;
 use vaultblob_core::{
     Blob, BlobConfig, FileId, Vault, VaultConfig, VaultError, VaultId, VaultMasterKey,
+    discover_vault_id, generate_blob_filename,
 };
-
-const META_FILENAME: &str = "vault.meta";
 
 pub fn blob_config(verbose: bool) -> BlobConfig {
     BlobConfig {
@@ -20,49 +18,6 @@ pub fn blob_config(verbose: bool) -> BlobConfig {
     }
 }
 
-pub fn open_or_create_meta(
-    vault_dir: &Path,
-    password: &str,
-) -> Result<(VaultId, VaultMasterKey), VaultError> {
-    let meta_path = vault_dir.join(META_FILENAME);
-    if meta_path.exists() {
-        load_meta(vault_dir, password)
-    } else {
-        fs::create_dir_all(vault_dir)?;
-        let mut vault_id_bytes = [0u8; 16];
-        let mut salt = [0u8; 32];
-        rand::rng().fill(&mut vault_id_bytes);
-        rand::rng().fill(&mut salt);
-
-        let mut meta = [0u8; 48];
-        meta[..16].copy_from_slice(&vault_id_bytes);
-        meta[16..].copy_from_slice(&salt);
-        fs::write(&meta_path, meta)?;
-
-        let vault_id = VaultId(vault_id_bytes);
-        let master_key = derive_master_key(password, &salt)?;
-        Ok((vault_id, master_key))
-    }
-}
-
-pub fn load_meta(vault_dir: &Path, password: &str) -> Result<(VaultId, VaultMasterKey), VaultError> {
-    let data = fs::read(vault_dir.join(META_FILENAME))?;
-    if data.len() != 48 {
-        return Err(VaultError::IndexChainBroken);
-    }
-    let vault_id = VaultId(data[..16].try_into().unwrap());
-    let salt: [u8; 32] = data[16..].try_into().unwrap();
-    Ok((vault_id, derive_master_key(password, &salt)?))
-}
-
-fn derive_master_key(password: &str, salt: &[u8; 32]) -> Result<VaultMasterKey, VaultError> {
-    let mut key = [0u8; 32];
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default())
-        .hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|_| VaultError::InvalidMasterKey)?;
-    Ok(VaultMasterKey(key))
-}
-
 pub fn open_vault_from_dir(
     vault_dir: &Path,
     vault_id: VaultId,
@@ -71,10 +26,35 @@ pub fn open_vault_from_dir(
     verbose: bool,
 ) -> Result<Vault, VaultError> {
     let bcfg = blob_config(verbose);
-    let blobs = collect_blobs(vault_dir, vault_id, master_key, &bcfg)?;
+    let blobs = collect_blobs(vault_dir, master_key, &bcfg)?;
     if blobs.is_empty() {
         let blob = create_blob(vault_dir, vault_id, master_key, &bcfg)?;
         return Vault::open(vault_id, vec![blob], config);
+    }
+    Vault::open(vault_id, blobs, config)
+}
+
+pub fn open_vault_from_dir_discover(
+    vault_dir: &Path,
+    master_key: &VaultMasterKey,
+    config: VaultConfig,
+    verbose: bool,
+) -> Result<Vault, VaultError> {
+    let bcfg = blob_config(verbose);
+    let paths = collect_blob_paths(vault_dir, master_key)?;
+    if paths.is_empty() {
+        let vault_id: VaultId = VaultId(rand::random());
+        let blob = create_blob(vault_dir, vault_id, master_key, &bcfg)?;
+        return Vault::open(vault_id, vec![blob], config);
+    }
+    let vault_id = discover_vault_id(&paths[0], master_key)?;
+    let blobs = collect_blobs(vault_dir, master_key, &bcfg)?;
+    // Verify all blobs share the same vault_id
+    for path in &paths {
+        let vid = discover_vault_id(path, master_key)?;
+        if vid != vault_id {
+            return Err(VaultError::InvalidMasterKey);
+        }
     }
     Vault::open(vault_id, blobs, config)
 }
@@ -101,18 +81,16 @@ pub fn put_file_with_retry(
     }
 }
 
-fn collect_blobs(
+fn collect_blob_paths(
     vault_dir: &Path,
-    vault_id: VaultId,
     master_key: &VaultMasterKey,
-    blob_config: &BlobConfig,
-) -> Result<Vec<Blob>, VaultError> {
+) -> Result<Vec<PathBuf>, VaultError> {
     let mut paths: Vec<PathBuf> = fs::read_dir(vault_dir)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let name = entry.file_name();
             let name = name.to_str()?;
-            if name.starts_with("blob-") && name.ends_with(".blob") {
+            if vaultblob_core::verify_blob_filename(master_key, name) {
                 Some(entry.path())
             } else {
                 None
@@ -120,10 +98,18 @@ fn collect_blobs(
         })
         .collect();
     paths.sort();
+    Ok(paths)
+}
 
+fn collect_blobs(
+    vault_dir: &Path,
+    master_key: &VaultMasterKey,
+    blob_config: &BlobConfig,
+) -> Result<Vec<Blob>, VaultError> {
+    let paths = collect_blob_paths(vault_dir, master_key)?;
     paths
         .into_iter()
-        .map(|path| Blob::open(&path, vault_id, master_key, blob_config.clone()))
+        .map(|path| Blob::open(&path, None, master_key, blob_config.clone()))
         .collect()
 }
 
@@ -133,14 +119,9 @@ fn create_blob(
     master_key: &VaultMasterKey,
     blob_config: &BlobConfig,
 ) -> Result<Blob, VaultError> {
-    let mut n = 1usize;
-    loop {
-        let path = vault_dir.join(format!("blob-{n:04}.blob"));
-        if !path.exists() {
-            return Blob::open(&path, vault_id, master_key, blob_config.clone());
-        }
-        n += 1;
-    }
+    let name = generate_blob_filename(master_key)?;
+    let path = vault_dir.join(name);
+    Blob::open(&path, Some(vault_id), master_key, blob_config.clone())
 }
 
 pub fn random_file_id() -> FileId {

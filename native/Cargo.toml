@@ -9,6 +9,5 @@ crate-type = ["cdylib"]
 name = "vaultblob"
 
 [dependencies]
-argon2 = "0.5"
 rand = "0.10.1"
 vaultblob-core = { path = ".." }

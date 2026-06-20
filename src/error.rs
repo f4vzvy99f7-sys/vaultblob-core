@@ -25,6 +25,14 @@ pub enum VaultError {
     RetryBudgetExceeded,
 }
 
+impl std::fmt::Display for VaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for VaultError {}
+
 impl From<io::Error> for VaultError {
     fn from(e: io::Error) -> Self {
         VaultError::Io(e)

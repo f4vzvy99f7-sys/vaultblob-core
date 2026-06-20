@@ -187,7 +187,7 @@ struct ExclusiveLock(libc::c_int);
 impl Blob {
     pub fn open<P: AsRef<Path>>(
         path: P,
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
         master_key: &VaultMasterKey,
         config: BlobConfig,
     ) -> Result<Self, VaultError> {
@@ -203,13 +203,14 @@ impl Blob {
         if existed && file.metadata()?.len() >= FRONT_MATTER_LEN {
             Self::from_existing(path, file, vault_id, master_key, config)
         } else {
+            let vault_id = vault_id.ok_or(VaultError::InvalidConfig)?;
             Self::create_new(path, &mut file, vault_id, master_key, config)
         }
     }
 
     pub fn open_existing<P: AsRef<Path>>(
         path: P,
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
         master_key: &VaultMasterKey,
         config: BlobConfig,
     ) -> Result<Self, VaultError> {
@@ -498,7 +499,7 @@ impl Blob {
     fn from_existing(
         path: PathBuf,
         mut file: File,
-        expected_vault_id: VaultId,
+        vault_id_opt: Option<VaultId>,
         master_key: &VaultMasterKey,
         config: BlobConfig,
     ) -> Result<Self, VaultError> {
@@ -507,7 +508,7 @@ impl Blob {
         file.seek(SeekFrom::Start(STABLE_SLOT_OFFSET))?;
         file.read_exact(&mut stable_slot)?;
 
-        let stable = decrypt_slot(&master_key.0, &stable_slot, &expected_vault_id.0)?;
+        let stable = decrypt_slot(&master_key.0, &stable_slot, &[])?;
         if stable.len() < STABLE_PAYLOAD_LEN {
             return Err(VaultError::AeadDecryptFailed);
         }
@@ -515,8 +516,10 @@ impl Blob {
         let vault_id = VaultId(copy_array(
             &stable[STABLE_VAULT_ID_OFFSET..STABLE_VAULT_ID_OFFSET + 16],
         ));
-        if vault_id != expected_vault_id {
-            return Err(VaultError::InvalidMasterKey);
+        if let Some(expected) = vault_id_opt {
+            if vault_id != expected {
+                return Err(VaultError::InvalidMasterKey);
+            }
         }
         let blob_id = BlobId(copy_array(
             &stable[STABLE_BLOB_ID_OFFSET..STABLE_BLOB_ID_OFFSET + 16],
@@ -593,7 +596,7 @@ impl Blob {
             .copy_from_slice(&index_nonce);
         fill_random(&mut stable_plaintext[STABLE_PAYLOAD_LEN..]);
 
-        let stable_slot = encrypt_slot(&master_key.0, &stable_plaintext, &vault_id.0)?;
+        let stable_slot = encrypt_slot(&master_key.0, &stable_plaintext, &[])?;
         file.write_all(&stable_slot)?;
 
         let blob_id = BlobId(blob_id);
@@ -1359,6 +1362,85 @@ fn checked_add(a: u64, b: u64) -> Result<u64, VaultError> {
     a.checked_add(b).ok_or(VaultError::IntegerOverflow)
 }
 
+// -- Blob discovery & filename AEAD --
+
+const BLOB_FILENAME_PURPOSE: &[u8] = b"vaultblob-filename";
+const BLOB_FILENAME_NONCE_PURPOSE: &[u8] = b"vaultblob-filename-nonce";
+
+/// Extract vault_id from an existing blob file without knowing the vault_id ahead of time.
+pub fn discover_vault_id(path: &Path, master_key: &VaultMasterKey) -> Result<VaultId, VaultError> {
+    let mut file = File::open(path)?;
+    let mut stable_slot = [0_u8; STABLE_SLOT_LEN];
+    file.seek(SeekFrom::Start(STABLE_SLOT_OFFSET))?;
+    file.read_exact(&mut stable_slot)?;
+    let stable = decrypt_slot(&master_key.0, &stable_slot, &[])?;
+    if stable.len() < STABLE_PAYLOAD_LEN {
+        return Err(VaultError::AeadDecryptFailed);
+    }
+    Ok(VaultId(copy_array(
+        &stable[STABLE_VAULT_ID_OFFSET..STABLE_VAULT_ID_OFFSET + 16],
+    )))
+}
+
+fn derive_filename_key(master_key: &[u8; 32], salt: &[u8; 32]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(salt), master_key);
+    let mut key = [0_u8; 32];
+    hk.expand(BLOB_FILENAME_PURPOSE, &mut key)
+        .expect("32-byte HKDF output is valid");
+    key
+}
+
+fn derive_filename_nonce(salt: &[u8; 32]) -> [u8; 24] {
+    let mut out = [0_u8; 24];
+    let mut hasher = Blake2bVar::new(24).expect("24-byte BLAKE2b output is valid");
+    hasher.update(salt);
+    hasher.update(BLOB_FILENAME_NONCE_PURPOSE);
+    hasher
+        .finalize_variable(&mut out)
+        .expect("fixed output buffer has requested length");
+    out
+}
+
+/// Generate a random blob filename (128 hex chars) for a given master_key.
+pub fn generate_blob_filename(master_key: &VaultMasterKey) -> Result<String, VaultError> {
+    let mut salt = [0_u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    let key_arr = derive_filename_key(&master_key.0, &salt);
+    let cipher = <XChaCha20Poly1305 as Poly1305KeyInit>::new(
+        Key::from_slice(&key_arr).into(),
+    );
+    let nonce_arr = derive_filename_nonce(&salt);
+    let nonce = XNonce::from_slice(&nonce_arr);
+    let ciphertext = cipher
+        .encrypt(nonce, Payload { msg: &[0_u8; 16], aad: &[] })
+        .map_err(|_| VaultError::AeadEncryptFailed)?;
+    let mut raw = Vec::with_capacity(64);
+    raw.extend_from_slice(&salt);
+    raw.extend_from_slice(&ciphertext);
+    Ok(hex::encode(raw))
+}
+
+/// Verify that a filename (128 hex chars, no extension) is valid for a given master_key.
+pub fn verify_blob_filename(master_key: &VaultMasterKey, name: &str) -> bool {
+    if name.len() != 128 {
+        return false;
+    }
+    let raw = match hex::decode(name) {
+        Ok(b) if b.len() == 64 => b,
+        _ => return false,
+    };
+    let salt: [u8; 32] = copy_array(&raw[..32]);
+    let key_arr = derive_filename_key(&master_key.0, &salt);
+    let cipher = <XChaCha20Poly1305 as Poly1305KeyInit>::new(
+        Key::from_slice(&key_arr).into(),
+    );
+    let nonce_arr = derive_filename_nonce(&salt);
+    let nonce = XNonce::from_slice(&nonce_arr);
+    cipher
+        .decrypt(nonce, Payload { msg: &raw[32..], aad: &[] })
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,7 +1536,7 @@ mod tests {
             diagnostics: false,
         };
 
-        let mut blob = Blob::open(&path, vault_id(), &master_key(), config.clone()).unwrap();
+        let mut blob = Blob::open(&path, Some(vault_id()), &master_key(), config.clone()).unwrap();
         let chunks = vec![
             NewChunk {
                 file_id: file_id(1),
@@ -1479,7 +1561,7 @@ mod tests {
         assert_eq!(blob.read_chunk(&written.entries[1]).unwrap(), b"world");
 
         drop(blob);
-        let mut reopened = Blob::open_existing(&path, vault_id(), &master_key(), config).unwrap();
+        let mut reopened = Blob::open_existing(&path, Some(vault_id()), &master_key(), config).unwrap();
         let index = reopened.read_index().unwrap();
         assert_eq!(index.chunks.len(), 2);
         assert_eq!(index.completed_files.len(), 1);
@@ -1500,7 +1582,7 @@ mod tests {
             diagnostics: false,
         };
 
-        let mut blob = Blob::open(&path, vault_id(), &master_key(), config).unwrap();
+        let mut blob = Blob::open(&path, Some(vault_id()), &master_key(), config).unwrap();
         let first = blob
             .write_chunks(
                 &[NewChunk {

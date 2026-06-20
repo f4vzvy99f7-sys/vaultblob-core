@@ -726,7 +726,7 @@ mod tests {
     fn blob(path: &PathBuf) -> Blob {
         Blob::open(
             path,
-            vault_id(),
+            Some(vault_id()),
             &master_key(),
             BlobConfig {
                 initial_leading_gap: 128,
