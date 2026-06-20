@@ -378,6 +378,75 @@ pub unsafe extern "C" fn vaultblob_read_file(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn vaultblob_read_file_range(
+    session: *mut Session,
+    file_id: *const c_char,
+    offset: u64,
+    length: u64,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    if session.is_null() {
+        if !error_out.is_null() {
+            unsafe { *error_out = to_c_string("null session"); }
+        }
+        return -1;
+    }
+    let session = unsafe { &*session };
+    let file_id_str = match unsafe { cstr_to_str(file_id) } {
+        Ok(s) => s,
+        Err(e) => {
+            if !error_out.is_null() {
+                unsafe { *error_out = to_c_string(&to_vault_err(e)); }
+            }
+            return -1;
+        }
+    };
+    let file_id = match vault_io::parse_file_id(file_id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            if !error_out.is_null() {
+                unsafe { *error_out = to_c_string(&to_vault_err(e)); }
+            }
+            return -1;
+        }
+    };
+
+    let mut vault = match session.vault.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            if !error_out.is_null() {
+                unsafe { *error_out = to_c_string("mutex poisoned"); }
+            }
+            return -1;
+        }
+    };
+
+    match vault.read_file_range(file_id, offset, length) {
+        Ok(bytes) => {
+            let boxed = bytes.into_boxed_slice();
+            let len = boxed.len();
+            let ptr = boxed.as_ptr() as *mut u8;
+            std::mem::forget(boxed);
+            if !out_data.is_null() {
+                unsafe { *out_data = ptr; }
+            }
+            if !out_len.is_null() {
+                unsafe { *out_len = len; }
+            }
+            0
+        }
+        Err(e) => {
+            if !error_out.is_null() {
+                unsafe { *error_out = to_c_string(&to_vault_err(e)); }
+            }
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vaultblob_file_size(
     session: *mut Session,
     file_id: *const c_char,
