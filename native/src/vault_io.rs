@@ -18,22 +18,6 @@ pub fn blob_config(verbose: bool) -> BlobConfig {
     }
 }
 
-pub fn open_vault_from_dir(
-    vault_dir: &Path,
-    vault_id: VaultId,
-    master_key: &VaultMasterKey,
-    config: VaultConfig,
-    verbose: bool,
-) -> Result<Vault, VaultError> {
-    let bcfg = blob_config(verbose);
-    let blobs = collect_blobs(vault_dir, master_key, &bcfg)?;
-    if blobs.is_empty() {
-        let blob = create_blob(vault_dir, vault_id, master_key, &bcfg)?;
-        return Vault::open(vault_id, vec![blob], config);
-    }
-    Vault::open(vault_id, blobs, config)
-}
-
 pub fn open_vault_from_dir_discover(
     vault_dir: &Path,
     master_key: &VaultMasterKey,
@@ -130,24 +114,4 @@ pub fn random_file_id() -> FileId {
     FileId(bytes)
 }
 
-pub fn format_file_id(file_id: FileId) -> String {
-    let b = file_id.0;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
-        b[14], b[15],
-    )
-}
 
-pub fn parse_file_id(s: &str) -> Result<FileId, VaultError> {
-    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if hex.len() != 32 {
-        return Err(VaultError::FileNotFound);
-    }
-    let mut bytes = [0u8; 16];
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| VaultError::FileNotFound)?;
-    }
-    Ok(FileId(bytes))
-}
