@@ -1363,9 +1363,8 @@ fn checked_add(a: u64, b: u64) -> Result<u64, VaultError> {
 }
 
 // -- Blob discovery & filename AEAD --
-
-const BLOB_FILENAME_PURPOSE: &[u8] = b"vaultblob-filename";
-const BLOB_FILENAME_NONCE_PURPOSE: &[u8] = b"vaultblob-filename-nonce";
+/// Purpose string for HMAC-based blob filename generation.
+const BLOB_FILENAME_PURPOSE: &[u8] = b"vaultblob-filename-v2";
 
 /// Extract vault_id from an existing blob file without knowing the vault_id ahead of time.
 pub fn discover_vault_id(path: &Path, master_key: &VaultMasterKey) -> Result<VaultId, VaultError> {
@@ -1382,63 +1381,46 @@ pub fn discover_vault_id(path: &Path, master_key: &VaultMasterKey) -> Result<Vau
     )))
 }
 
-fn derive_filename_key(master_key: &[u8; 32], salt: &[u8; 32]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(salt), master_key);
-    let mut key = [0_u8; 32];
-    hk.expand(BLOB_FILENAME_PURPOSE, &mut key)
-        .expect("32-byte HKDF output is valid");
-    key
-}
-
-fn derive_filename_nonce(salt: &[u8; 32]) -> [u8; 24] {
-    let mut out = [0_u8; 24];
-    let mut hasher = Blake2bVar::new(24).expect("24-byte BLAKE2b output is valid");
-    hasher.update(salt);
-    hasher.update(BLOB_FILENAME_NONCE_PURPOSE);
-    hasher
-        .finalize_variable(&mut out)
-        .expect("fixed output buffer has requested length");
-    out
-}
-
-/// Generate a random blob filename (128 hex chars) for a given master_key.
+/// Generate a random blob filename (32 hex chars) for a given master_key.
+///
+/// Format: hex(random_8byte_prefix) + hex(SHA256(master_key || purpose || prefix)[..8])
+/// Total: 16 + 16 = 32 hex chars.
 pub fn generate_blob_filename(master_key: &VaultMasterKey) -> Result<String, VaultError> {
-    let mut salt = [0_u8; 32];
-    OsRng.fill_bytes(&mut salt);
-    let key_arr = derive_filename_key(&master_key.0, &salt);
-    let cipher = <XChaCha20Poly1305 as Poly1305KeyInit>::new(
-        Key::from_slice(&key_arr).into(),
-    );
-    let nonce_arr = derive_filename_nonce(&salt);
-    let nonce = XNonce::from_slice(&nonce_arr);
-    let ciphertext = cipher
-        .encrypt(nonce, Payload { msg: &[0_u8; 16], aad: &[] })
-        .map_err(|_| VaultError::AeadEncryptFailed)?;
-    let mut raw = Vec::with_capacity(64);
-    raw.extend_from_slice(&salt);
-    raw.extend_from_slice(&ciphertext);
-    Ok(hex::encode(raw))
+    use sha2::{Sha256, Digest};
+
+    let mut prefix = [0_u8; 8];
+    OsRng.fill_bytes(&mut prefix);
+
+    let mut hasher = Sha256::new();
+    hasher.update(&master_key.0);
+    hasher.update(BLOB_FILENAME_PURPOSE);
+    hasher.update(&prefix);
+    let tag = &hasher.finalize()[..8];
+
+    Ok(hex::encode(prefix) + &hex::encode(tag))
 }
 
-/// Verify that a filename (128 hex chars, no extension) is valid for a given master_key.
+/// Verify that a filename (32 hex chars) is valid for a given master_key.
 pub fn verify_blob_filename(master_key: &VaultMasterKey, name: &str) -> bool {
-    if name.len() != 128 {
+    use sha2::{Sha256, Digest};
+
+    if name.len() != 32 {
         return false;
     }
     let raw = match hex::decode(name) {
-        Ok(b) if b.len() == 64 => b,
+        Ok(b) if b.len() == 16 => b,
         _ => return false,
     };
-    let salt: [u8; 32] = copy_array(&raw[..32]);
-    let key_arr = derive_filename_key(&master_key.0, &salt);
-    let cipher = <XChaCha20Poly1305 as Poly1305KeyInit>::new(
-        Key::from_slice(&key_arr).into(),
-    );
-    let nonce_arr = derive_filename_nonce(&salt);
-    let nonce = XNonce::from_slice(&nonce_arr);
-    cipher
-        .decrypt(nonce, Payload { msg: &raw[32..], aad: &[] })
-        .is_ok()
+    let prefix = &raw[..8];
+    let stored_tag = &raw[8..];
+
+    let mut hasher = Sha256::new();
+    hasher.update(&master_key.0);
+    hasher.update(BLOB_FILENAME_PURPOSE);
+    hasher.update(prefix);
+    let expected = &hasher.finalize()[..8];
+
+    expected == stored_tag
 }
 
 #[cfg(test)]
