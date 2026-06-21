@@ -7,8 +7,6 @@ use blake2::{
     digest::{Update, VariableOutput},
 };
 
-use crate::frontmatter::FrontMatter;
-
 use crate::blob::{Blob, BlobIndex, BlobLayoutStats, NewChunk, NewFileComplete};
 use crate::error::VaultError;
 use crate::types::{BlobId, ChunkEntry, FileCompleteEntry, FileId, VaultId};

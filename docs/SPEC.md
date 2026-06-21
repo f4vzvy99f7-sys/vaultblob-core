@@ -13,7 +13,7 @@ A minimal, write-only encrypted storage format. Files are split into chunks acro
 | **Chunk** | One AEAD-encrypted data block. Holds a portion of a file. |
 | **File** | A logical, ordered collection of chunks identified by a UUID. No on-disk representation — emergent from grouping chunks by `file_id`. |
 | **Index** | A single contiguous region of stream-cipher ciphertext near the end of a blob, listing chunks contained in that blob. Authenticated by a MAC stored in the volatile slot. |
-| **Stable slot** | A record in front matter holding per-blob constants (`vault_id`, `blob_id`, wrapped `K_data` and `K_index`, `index_nonce`). Encrypted under `vault_master_key`. Written once at blob creation. |
+| **Stable slot** | A record in front matter holding the spec version and per-blob constants (`vault_id`, `blob_id`, wrapped `K_data` and `K_index`, `index_nonce`). Encrypted under `vault_master_key`. Written once at blob creation. |
 | **Volatile slot** | A record in front matter holding the current index location, length, generation, and authenticating MAC. Encrypted under `K_index`. Two slots per blob; the one with the highest valid generation is canonical. |
 
 ---
@@ -24,8 +24,7 @@ A minimal, write-only encrypted storage format. Files are split into chunks acro
 ┌─────────────────────────────────────────────────────────────────┐
 │                   FRONT MATTER  (4096 bytes, fixed)             │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │ salt            32 B    random, public                   │   │
-│  │ stable slot   2016 B    AEAD(vault_master_key)           │   │
+│  │ stable slot   2048 B    AEAD(vault_master_key)           │   │
 │  │ volatile A    1024 B    AEAD(K_index)                    │   │
 │  │ volatile B    1024 B    AEAD(K_index)                    │   │
 │  └──────────────────────────────────────────────────────────┘   │
@@ -52,15 +51,14 @@ The volatile slot's `index_offset` and `index_length` locate the index region in
 ## Front Matter (4096 bytes, fixed)
 
 | Offset | Size | Field | Notes |
-|---|---|---|---|
-| 0 | 32 | `salt` | Random, public. Indistinguishable from random. |
-| 32 | 2016 | `stable_slot` | AEAD frame under `vault_master_key`. Written once at blob creation. |
+|---|---|---|---|---|
+| 0 | 2048 | `stable_slot` | AEAD frame under `vault_master_key`. Written once at blob creation. |
 | 2048 | 1024 | `volatile_slot_A` | AEAD frame under `K_index`. Rewritten on every commit. |
 | 3072 | 1024 | `volatile_slot_B` | AEAD frame under `K_index`. Rewritten on every commit. |
 
 The split between stable and volatile parts lets long-running writers discard the `vault_master_key` after the first open: the per-write fields are encrypted under `K_index`, which is itself recovered from the stable slot once at blob open.
 
-### Stable slot (2016 bytes)
+### Stable slot (2048 bytes)
 
 ```
 ┌───────────┬──────────────────────────────────────┬───────┬─────────────────┐
@@ -78,13 +76,14 @@ The split between stable and volatile parts lets long-running writers discard th
 
 | Size | Field | Notes |
 |---|---|---|
+| 4 | `version` | Spec version (currently `1`). Tells readers how to interpret the payload. |
 | 16 | `vault_id` | UUID. Same across all blobs in a vault. |
 | 16 | `blob_id` | UUID. Unique per blob. |
 | 48 | `wrapped_K_data` | AEAD(vault_master_key) over 32 B random key. |
 | 48 | `wrapped_K_index` | AEAD(vault_master_key) over 32 B random key. |
 | 24 | `index_nonce` | Random 24 B. Used for the stream cipher over the index region. Fixed for the life of the blob (see write protocol invariant below). |
 
-Total payload: ~152 B. Remainder of the 2016 B slot is random padding inside the ciphertext, so payload size does not leak.
+Total payload: ~156 B. Remainder of the 2048 B slot is random padding inside the ciphertext, so payload size does not leak.
 
 The stable slot is written exactly once at blob creation. It is never rewritten under normal operation. Master-key rotation is the only operation that touches it (rewrap `K_data` and `K_index` under the new master key, write a new stable slot). The `index_nonce` is preserved verbatim across master-key rotation.
 
@@ -331,11 +330,11 @@ Note that v1 (revised) has no analog of the old "segment-count ceiling" that pre
 
 ```
 1. Read bytes [0, 4096) → front matter.
-2. Read salt (offset 0..32) — used by app layer if relevant.
-3. AEAD-decrypt the stable slot with vault_master_key.
-   Recover vault_id, blob_id, K_data, K_index, index_nonce.
+2. AEAD-decrypt the stable slot at offset 0 with vault_master_key.
+   Recover version, vault_id, blob_id, K_data, K_index, index_nonce.
+   If version is not understood, refuse to open (forward-compat guard).
    The vault_master_key MAY now be discarded.
-4. Derive K_mac = HKDF(K_index, salt=blob_id, info="index-mac").
+3. Derive K_mac = HKDF(K_index, salt=blob_id, info="index-mac").
 5. AEAD-decrypt volatile slot A and volatile slot B with K_index.
 6. Pick the volatile slot with the highest `generation` that validates.
    - If neither validates: scan recovery (out of scope for v1).
@@ -416,8 +415,7 @@ On POSIX systems, the exclusive lock is `flock(LOCK_EX)`. On Windows, the equiva
 Without `vault_master_key`, an observer of a blob file learns:
 
 - Total file length.
-- That offset 0 contains a 32-byte value (the salt, which is uniformly random).
-- That offsets 32..4096 contain two 2032-byte regions that look random.
+- That offsets 0..4096 contain three random-looking regions (one 2048 B and two 1024 B).
 - That offsets 4096..EOF contain random-looking bytes.
 
 They cannot determine:

@@ -22,9 +22,8 @@ use crate::error::VaultError;
 use crate::types::{BlobId, ChunkEntry, FileCompleteEntry, FileId, VaultId, VaultMasterKey};
 
 const FRONT_MATTER_LEN: u64 = 4096;
-const SALT_LEN: usize = 32;
-const STABLE_SLOT_OFFSET: u64 = 32;
-const STABLE_SLOT_LEN: usize = 2016;
+const STABLE_SLOT_OFFSET: u64 = 0;
+const STABLE_SLOT_LEN: usize = 2048;
 const VOLATILE_A_OFFSET: u64 = 2048;
 const VOLATILE_B_OFFSET: u64 = 3072;
 const VOLATILE_SLOT_LEN: usize = 1024;
@@ -32,13 +31,15 @@ const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
 const STABLE_PLAINTEXT_LEN: usize = STABLE_SLOT_LEN - NONCE_LEN - TAG_LEN;
 const VOLATILE_PLAINTEXT_LEN: usize = VOLATILE_SLOT_LEN - NONCE_LEN - TAG_LEN;
-const STABLE_PAYLOAD_LEN: usize = 152;
+const SPEC_VERSION: u32 = 1;
+const STABLE_PAYLOAD_LEN: usize = 156;
 const WRAPPED_KEY_LEN: usize = 48;
-const STABLE_VAULT_ID_OFFSET: usize = 0;
-const STABLE_BLOB_ID_OFFSET: usize = 16;
-const STABLE_WRAPPED_K_DATA_OFFSET: usize = 32;
-const STABLE_WRAPPED_K_INDEX_OFFSET: usize = 80;
-const STABLE_INDEX_NONCE_OFFSET: usize = 128;
+const STABLE_VERSION_OFFSET: usize = 0;
+const STABLE_VAULT_ID_OFFSET: usize = 4;
+const STABLE_BLOB_ID_OFFSET: usize = 20;
+const STABLE_WRAPPED_K_DATA_OFFSET: usize = 36;
+const STABLE_WRAPPED_K_INDEX_OFFSET: usize = 84;
+const STABLE_INDEX_NONCE_OFFSET: usize = 132;
 const VOLATILE_PAYLOAD_LEN: usize = 56;
 const CHUNK_OVERHEAD: u64 = (NONCE_LEN + TAG_LEN) as u64;
 const CHUNK_ENTRY_PAYLOAD_LEN: usize = 72;
@@ -513,6 +514,13 @@ impl Blob {
             return Err(VaultError::AeadDecryptFailed);
         }
 
+        let version = u32::from_le_bytes(copy_array(
+            &stable[STABLE_VERSION_OFFSET..STABLE_VERSION_OFFSET + 4],
+        ));
+        if version != SPEC_VERSION {
+            return Err(VaultError::InvalidConfig);
+        }
+
         let vault_id = VaultId(copy_array(
             &stable[STABLE_VAULT_ID_OFFSET..STABLE_VAULT_ID_OFFSET + 16],
         ));
@@ -563,25 +571,24 @@ impl Blob {
         validate_config(&config)?;
         let _lock = ExclusiveLock::acquire(file)?;
 
-        let mut salt = [0_u8; SALT_LEN];
         let mut blob_id = [0_u8; 16];
         let mut k_data = [0_u8; 32];
         let mut k_index = [0_u8; 32];
         let mut index_nonce = [0_u8; NONCE_LEN];
-        fill_random(&mut salt);
         fill_random(&mut blob_id);
         fill_random(&mut k_data);
         fill_random(&mut k_index);
         fill_random(&mut index_nonce);
 
         file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&salt)?;
 
         let wrapped_k_data = wrap_stable_key(&master_key.0, &vault_id, "K_data", &k_data)?;
         let wrapped_k_index = wrap_stable_key(&master_key.0, &vault_id, "K_index", &k_index)?;
 
+        let version = SPEC_VERSION.to_le_bytes();
         let mut stable_plaintext = vec![0_u8; STABLE_PLAINTEXT_LEN];
+        stable_plaintext[STABLE_VERSION_OFFSET..STABLE_VERSION_OFFSET + 4]
+            .copy_from_slice(&version);
         stable_plaintext[STABLE_VAULT_ID_OFFSET..STABLE_VAULT_ID_OFFSET + 16]
             .copy_from_slice(&vault_id.0);
         stable_plaintext[STABLE_BLOB_ID_OFFSET..STABLE_BLOB_ID_OFFSET + 16]
@@ -597,6 +604,7 @@ impl Blob {
         fill_random(&mut stable_plaintext[STABLE_PAYLOAD_LEN..]);
 
         let stable_slot = encrypt_slot(&master_key.0, &stable_plaintext, &[])?;
+        file.seek(SeekFrom::Start(STABLE_SLOT_OFFSET))?;
         file.write_all(&stable_slot)?;
 
         let blob_id = BlobId(blob_id);

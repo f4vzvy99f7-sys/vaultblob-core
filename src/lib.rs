@@ -1,8 +1,6 @@
 pub mod blob;
-pub mod crypto_utils;
 pub mod diag;
 pub mod error;
-pub mod frontmatter;
 pub mod types;
 pub mod vault;
 
